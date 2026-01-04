@@ -2,19 +2,80 @@
 
 ## Overview
 
-This document provides a comprehensive analysis of the semantic search implementation in Obsidian Copilot. The system combines vector-based semantic search with lexical (keyword-based) search to provide powerful note retrieval capabilities for AI agents. This analysis is intended to help understand how to implement a similar feature for CLI-based AI agents, with a focus on local, API-free implementations.
+This document provides a comprehensive analysis of the semantic search implementation in Obsidian Copilot. The system combines vector-based semantic search with lexical (keyword-based) search to provide powerful note retrieval capabilities for AI agents.
+
+**For CLI-Based AI Agents**: This document explains how external CLI agents can access Obsidian Copilot's built-in semantic search via **MCP (Model Context Protocol)**. The search functionality is fully integrated into the Obsidian plugin - users only need to install your CLI tool, and it can query the plugin's semantic search through MCP without any additional setup.
 
 ## Table of Contents
 
-1. [Architecture Overview](#architecture-overview)
-2. [Package Dependencies](#package-dependencies)
-3. [Data Storage](#data-storage)
-4. [Chunking Strategy](#chunking-strategy)
-5. [Embedding Models](#embedding-models)
-6. [Vector Search Implementation](#vector-search-implementation)
-7. [Lexical Search (v3)](#lexical-search-v3)
-8. [Local-Only Implementation Path](#local-only-implementation-path)
-9. [Key Files Reference](#key-files-reference)
+1. [Accessing Search from CLI Agents (MCP)](#accessing-search-from-cli-agents-mcp)
+2. [Architecture Overview](#architecture-overview)
+3. [Package Dependencies](#package-dependencies)
+4. [Data Storage](#data-storage)
+5. [Chunking Strategy](#chunking-strategy)
+6. [Embedding Models](#embedding-models)
+7. [Vector Search Implementation](#vector-search-implementation)
+8. [Lexical Search (v3)](#lexical-search-v3)
+9. [Key Files Reference](#key-files-reference)(#key-files-reference)
+
+---
+
+## Accessing Search from CLI Agents (MCP)
+
+**Important**: The semantic search functionality described in this document is **already built into the Obsidian Copilot plugin**. CLI agents don't need to re-implement it - they access it through **Model Context Protocol (MCP)**.
+
+### Quick Start for CLI Developers
+
+1. **Users Install**: Obsidian Copilot plugin + your CLI tool
+2. **Your CLI**: Connect via MCP to access search
+3. **Plugin Handles**: All indexing, embeddings, and search logic
+
+### How It Works
+
+```
+CLI Agent → MCP → Obsidian Plugin → Semantic Search → Results
+```
+
+The plugin exposes its search functionality as an MCP tool that your CLI agent can call:
+
+```typescript
+// MCP tool interface (exposed by plugin)
+{
+  name: "localSearch",
+  description: "Search vault with semantic + lexical retrieval",
+  parameters: {
+    query: string,        // User's search query
+    maxK?: number,       // Max results (default: 10)
+    salientTerms?: string[]  // Additional keywords
+  }
+}
+```
+
+### MCP Integration Example
+
+```typescript
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+// Connect to plugin
+const client = new Client({ name: "my-cli-agent", version: "1.0.0" });
+await client.connect(transport);
+
+// Search the vault
+const results = await client.callTool({
+  name: "localSearch",
+  arguments: {
+    query: "machine learning algorithms",
+    maxK: 10
+  }
+});
+
+// Use results in your agent
+console.log(results.documents);
+```
+
+**For full MCP integration details, see the [docs/TOOLS.md](docs/TOOLS.md) file in this repository.**
+
+**The rest of this document explains how the plugin's search works internally** - useful for understanding behavior, contributing, or debugging, but **not required for CLI integration**.
 
 ---
 
@@ -729,580 +790,6 @@ return Array.from(merged.values())
 
 ---
 
-## Local-Only Implementation Path
-
-### Recommended Architecture for CLI Agents
-
-Based on the analysis, here's a recommended local-only implementation:
-
-#### 1. Core Components
-
-```
-CLI Agent
-  ├─ Embedding Service (Ollama)
-  ├─ Vector Store (FAISS or Chroma)
-  ├─ Lexical Search (FlexSearch or MiniSearch)
-  ├─ Text Splitter (LangChain or custom)
-  └─ File Watcher (for incremental updates)
-```
-
-#### 2. Technology Stack
-
-**Embedding**:
-- **Ollama** with `nomic-embed-text` model
-  - Lightweight (137M params)
-  - Fast inference (~50ms per embedding)
-  - Good quality (768 dimensions)
-  - No API costs
-
-**Vector Store**:
-- **FAISS** (Facebook AI Similarity Search)
-  - Pure local (no network)
-  - Fast similarity search
-  - Persistent indexes
-  - Python/Node.js bindings available
-  
-- **Alternative**: Chroma (simpler API, good for smaller datasets)
-
-**Lexical Search**:
-- **FlexSearch** (same as Obsidian Copilot v3)
-  - Fast full-text search
-  - Multilingual support
-  - Small footprint
-  - Pure JavaScript
-
-**Text Processing**:
-- **LangChain TextSplitters** or equivalent
-  - Markdown-aware chunking
-  - Recursive splitting
-  - Deterministic results
-
-#### 3. Implementation Steps
-
-##### Step 1: Set Up Ollama
-
-```bash
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull embedding model
-ollama pull nomic-embed-text
-
-# Verify
-curl http://localhost:11434/api/embeddings \
-  -d '{"model": "nomic-embed-text", "prompt": "test"}'
-```
-
-##### Step 2: Install Dependencies
-
-```bash
-# Node.js example
-npm install @langchain/ollama @langchain/textsplitters
-npm install faiss-node  # or chromadb
-npm install flexsearch
-npm install chokidar  # File watching
-```
-
-##### Step 3: Implement Chunking
-
-```javascript
-import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
-import fs from "fs/promises";
-import crypto from "crypto";
-
-const CHUNK_SIZE = 6000;
-
-class DocumentChunker {
-  constructor() {
-    this.splitter = RecursiveCharacterTextSplitter.fromLanguage("markdown", {
-      chunkSize: CHUNK_SIZE,
-      chunkOverlap: 0,
-      separators: ["\n\n", "\n", ". ", " ", ""]
-    });
-  }
-  
-  async chunkFile(filePath) {
-    const content = await fs.readFile(filePath, "utf-8");
-    const basename = path.basename(filePath, ".md");
-    
-    // Add contextual header
-    const header = `\nNOTE TITLE: [[${basename}]]\n\nNOTE BLOCK CONTENT:\n\n`;
-    
-    const docs = await this.splitter.createDocuments([content], [], {
-      chunkHeader: header,
-      appendChunkOverlapHeader: false
-    });
-    
-    return docs.map((doc, index) => ({
-      id: `${filePath}#${index}`,
-      path: filePath,
-      chunkIndex: index,
-      content: doc.pageContent,
-      hash: crypto.createHash("md5").update(doc.pageContent).digest("hex")
-    }));
-  }
-}
-```
-
-##### Step 4: Implement Embedding Service
-
-```javascript
-import { OllamaEmbeddings } from "@langchain/ollama";
-
-class LocalEmbeddingService {
-  constructor() {
-    this.embeddings = new OllamaEmbeddings({
-      model: "nomic-embed-text",
-      baseUrl: "http://localhost:11434",
-      truncate: true
-    });
-  }
-  
-  async embedQuery(text) {
-    return await this.embeddings.embedQuery(text);
-  }
-  
-  async embedDocuments(texts) {
-    return await this.embeddings.embedDocuments(texts);
-  }
-}
-```
-
-##### Step 5: Implement Vector Store
-
-```javascript
-import faiss from "faiss-node";
-import fs from "fs/promises";
-
-class LocalVectorStore {
-  constructor(dimension = 768) {
-    this.dimension = dimension;
-    this.index = new faiss.IndexFlatL2(dimension);
-    this.documents = new Map();  // id -> document
-    this.idToIdx = new Map();    // id -> FAISS index
-    this.idxToId = new Map();    // FAISS index -> id
-  }
-  
-  async addDocuments(documents, embeddings) {
-    for (let i = 0; i < documents.length; i++) {
-      const doc = documents[i];
-      const embedding = embeddings[i];
-      
-      const idx = this.index.ntotal();
-      this.index.add(embedding);
-      
-      this.documents.set(doc.id, doc);
-      this.idToIdx.set(doc.id, idx);
-      this.idxToId.set(idx, doc.id);
-    }
-  }
-  
-  async search(queryEmbedding, k = 10, threshold = 0.1) {
-    const results = this.index.search(queryEmbedding, k);
-    
-    return results.labels.map((idx, i) => {
-      const docId = this.idxToId.get(idx);
-      const doc = this.documents.get(docId);
-      const distance = results.distances[i];
-      
-      // Convert L2 distance to similarity score (0-1)
-      const similarity = 1 / (1 + distance);
-      
-      return {
-        document: doc,
-        score: similarity
-      };
-    }).filter(result => result.score >= threshold);
-  }
-  
-  async save(filepath) {
-    await faiss.write_index(this.index, filepath + ".faiss");
-    await fs.writeFile(
-      filepath + ".meta.json",
-      JSON.stringify({
-        documents: Array.from(this.documents.entries()),
-        idToIdx: Array.from(this.idToIdx.entries()),
-        idxToId: Array.from(this.idxToId.entries())
-      })
-    );
-  }
-  
-  async load(filepath) {
-    this.index = await faiss.read_index(filepath + ".faiss");
-    const meta = JSON.parse(await fs.readFile(filepath + ".meta.json", "utf-8"));
-    
-    this.documents = new Map(meta.documents);
-    this.idToIdx = new Map(meta.idToIdx);
-    this.idxToId = new Map(meta.idxToId);
-  }
-}
-```
-
-##### Step 6: Implement Lexical Search
-
-```javascript
-import FlexSearch from "flexsearch";
-
-class LocalLexicalSearch {
-  constructor() {
-    this.index = new FlexSearch.Document({
-      encode: false,
-      tokenize: this.tokenizeMixed.bind(this),
-      document: {
-        id: "id",
-        index: [
-          { field: "title", weight: 3 },
-          { field: "path", weight: 2 },
-          { field: "content", weight: 1 }
-        ]
-      }
-    });
-  }
-  
-  tokenizeMixed(str) {
-    const tokens = new Set();
-    const lowered = str.toLowerCase();
-    
-    // ASCII words
-    const words = lowered.match(/[a-z0-9]+/g) || [];
-    words.forEach(word => tokens.add(word));
-    
-    // CJK bigrams (if needed)
-    const cjk = lowered.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]+/g) || [];
-    cjk.forEach(chars => {
-      for (let i = 0; i < chars.length - 1; i++) {
-        tokens.add(chars.substring(i, i + 2));
-      }
-    });
-    
-    return Array.from(tokens);
-  }
-  
-  addDocuments(documents) {
-    documents.forEach(doc => {
-      this.index.add({
-        id: doc.id,
-        title: doc.title || path.basename(doc.path, ".md"),
-        path: doc.path,
-        content: doc.content
-      });
-    });
-  }
-  
-  search(query, limit = 10) {
-    return this.index.search(query, limit);
-  }
-}
-```
-
-##### Step 7: Implement Hybrid Search
-
-```javascript
-class HybridSearch {
-  constructor(vectorStore, lexicalSearch, embeddingService) {
-    this.vectorStore = vectorStore;
-    this.lexicalSearch = lexicalSearch;
-    this.embeddingService = embeddingService;
-  }
-  
-  async search(query, options = {}) {
-    const {
-      maxK = 10,
-      vectorWeight = 0.6,
-      lexicalWeight = 0.4,
-      minSimilarity = 0.1
-    } = options;
-    
-    // Run both searches in parallel
-    const [vectorResults, lexicalResults] = await Promise.all([
-      this.searchVector(query, maxK * 2, minSimilarity),
-      this.searchLexical(query, maxK * 2)
-    ]);
-    
-    // Merge results with weighted scoring
-    const merged = new Map();
-    
-    for (const result of vectorResults) {
-      const score = result.score * vectorWeight;
-      merged.set(result.document.id, {
-        document: result.document,
-        score: score,
-        sources: ["vector"]
-      });
-    }
-    
-    for (const result of lexicalResults) {
-      const id = result.id;
-      const score = result.score * lexicalWeight;
-      
-      if (merged.has(id)) {
-        merged.get(id).score += score;
-        merged.get(id).sources.push("lexical");
-      } else {
-        merged.set(id, {
-          document: result.document,
-          score: score,
-          sources: ["lexical"]
-        });
-      }
-    }
-    
-    // Sort and return top K
-    return Array.from(merged.values())
-      .sort((a, b) => b.score - a.score)
-      .slice(0, maxK);
-  }
-  
-  async searchVector(query, k, threshold) {
-    const queryEmbedding = await this.embeddingService.embedQuery(query);
-    return await this.vectorStore.search(queryEmbedding, k, threshold);
-  }
-  
-  async searchLexical(query, k) {
-    const results = this.lexicalSearch.search(query, k);
-    // FlexSearch returns array of result arrays by field
-    // Flatten and deduplicate
-    const seen = new Set();
-    const flattened = [];
-    
-    results.forEach(fieldResults => {
-      if (Array.isArray(fieldResults)) {
-        fieldResults.forEach(result => {
-          if (!seen.has(result.id)) {
-            seen.add(result.id);
-            flattened.push(result);
-          }
-        });
-      }
-    });
-    
-    return flattened;
-  }
-}
-```
-
-##### Step 8: Implement Indexing Pipeline
-
-```javascript
-import chokidar from "chokidar";
-import path from "path";
-
-class IndexingPipeline {
-  constructor(
-    documentsPath,
-    chunker,
-    embeddingService,
-    vectorStore,
-    lexicalSearch
-  ) {
-    this.documentsPath = documentsPath;
-    this.chunker = chunker;
-    this.embeddingService = embeddingService;
-    this.vectorStore = vectorStore;
-    this.lexicalSearch = lexicalSearch;
-    this.watcher = null;
-  }
-  
-  async indexAll() {
-    console.log("Starting full index...");
-    
-    // Find all markdown files
-    const files = await this.findMarkdownFiles(this.documentsPath);
-    console.log(`Found ${files.length} files`);
-    
-    // Process in batches
-    const batchSize = 10;
-    for (let i = 0; i < files.length; i += batchSize) {
-      const batch = files.slice(i, i + batchSize);
-      await this.indexBatch(batch);
-      console.log(`Indexed ${Math.min(i + batchSize, files.length)}/${files.length} files`);
-    }
-    
-    // Save indexes
-    await this.vectorStore.save(path.join(this.documentsPath, ".index", "vector"));
-    console.log("Indexing complete!");
-  }
-  
-  async indexBatch(files) {
-    // Chunk all files
-    const allChunks = [];
-    for (const file of files) {
-      const chunks = await this.chunker.chunkFile(file);
-      allChunks.push(...chunks);
-    }
-    
-    if (allChunks.length === 0) return;
-    
-    // Generate embeddings
-    const contents = allChunks.map(c => c.content);
-    const embeddings = await this.embeddingService.embedDocuments(contents);
-    
-    // Add to vector store
-    await this.vectorStore.addDocuments(allChunks, embeddings);
-    
-    // Add to lexical search
-    this.lexicalSearch.addDocuments(allChunks);
-  }
-  
-  async findMarkdownFiles(dir) {
-    const { globby } = await import("globby");
-    return await globby("**/*.md", { cwd: dir, absolute: true });
-  }
-  
-  watchForChanges() {
-    this.watcher = chokidar.watch("**/*.md", {
-      cwd: this.documentsPath,
-      ignoreInitial: true
-    });
-    
-    this.watcher.on("add", async (filepath) => {
-      console.log(`File added: ${filepath}`);
-      await this.indexBatch([path.join(this.documentsPath, filepath)]);
-    });
-    
-    this.watcher.on("change", async (filepath) => {
-      console.log(`File changed: ${filepath}`);
-      // Remove old chunks and reindex
-      await this.removeFileChunks(filepath);
-      await this.indexBatch([path.join(this.documentsPath, filepath)]);
-    });
-    
-    this.watcher.on("unlink", async (filepath) => {
-      console.log(`File removed: ${filepath}`);
-      await this.removeFileChunks(filepath);
-    });
-  }
-  
-  async removeFileChunks(filepath) {
-    // Implementation depends on vector store API
-    // For FAISS, you'd need to rebuild the index
-    // For Chroma, you can delete by metadata
-  }
-  
-  stopWatching() {
-    if (this.watcher) {
-      this.watcher.close();
-    }
-  }
-}
-```
-
-##### Step 9: Put It All Together
-
-```javascript
-// main.js
-import { DocumentChunker } from "./chunker.js";
-import { LocalEmbeddingService } from "./embeddings.js";
-import { LocalVectorStore } from "./vector-store.js";
-import { LocalLexicalSearch } from "./lexical-search.js";
-import { HybridSearch } from "./hybrid-search.js";
-import { IndexingPipeline } from "./indexing.js";
-
-async function main() {
-  const documentsPath = "./documents";
-  
-  // Initialize components
-  const chunker = new DocumentChunker();
-  const embeddingService = new LocalEmbeddingService();
-  const vectorStore = new LocalVectorStore(768); // nomic-embed-text dimension
-  const lexicalSearch = new LocalLexicalSearch();
-  
-  // Check if index exists
-  const indexPath = path.join(documentsPath, ".index", "vector");
-  const indexExists = await fs.access(indexPath + ".faiss")
-    .then(() => true)
-    .catch(() => false);
-  
-  if (indexExists) {
-    // Load existing index
-    console.log("Loading existing index...");
-    await vectorStore.load(indexPath);
-  } else {
-    // Build new index
-    const pipeline = new IndexingPipeline(
-      documentsPath,
-      chunker,
-      embeddingService,
-      vectorStore,
-      lexicalSearch
-    );
-    
-    await pipeline.indexAll();
-    
-    // Watch for changes (optional)
-    pipeline.watchForChanges();
-  }
-  
-  // Initialize search
-  const search = new HybridSearch(vectorStore, lexicalSearch, embeddingService);
-  
-  // Example search
-  const results = await search.search("machine learning algorithms", {
-    maxK: 10,
-    vectorWeight: 0.6,
-    lexicalWeight: 0.4,
-    minSimilarity: 0.1
-  });
-  
-  console.log("Search results:");
-  results.forEach((result, i) => {
-    console.log(`${i + 1}. [${result.score.toFixed(3)}] ${result.document.path}`);
-    console.log(`   Sources: ${result.sources.join(", ")}`);
-    console.log(`   Preview: ${result.document.content.substring(0, 100)}...`);
-  });
-}
-
-main().catch(console.error);
-```
-
-#### 4. Performance Considerations
-
-**Embedding Speed** (Ollama on M1 Mac):
-- nomic-embed-text: ~50ms per embedding
-- Batch of 10: ~200ms
-- Throughput: ~50 embeddings/second
-
-**Index Size Estimation**:
-- 1000 notes × 6 chunks/note = 6000 chunks
-- 768-dimensional vectors × 4 bytes = 3KB per vector
-- Total: ~18MB for vectors
-- FAISS index overhead: ~20-25MB total
-
-**Search Performance**:
-- FAISS search: <10ms for 6000 vectors
-- FlexSearch: <5ms for full-text
-- Embedding query: ~50ms
-- Total: ~65ms per search
-
-#### 5. Advantages of Local-Only Approach
-
-1. **No API Costs**: Zero recurring expenses
-2. **Privacy**: All data stays local
-3. **Offline**: Works without internet
-4. **Speed**: No network latency
-5. **Scalability**: Handles thousands of documents easily
-6. **Control**: Full control over models and configuration
-
-#### 6. Limitations and Mitigations
-
-**Limitation 1: Embedding Quality**
-- Local models may be less accurate than GPT-4 embeddings
-- **Mitigation**: Use `nomic-embed-text` or `mxbai-embed-large` (competitive with commercial models)
-
-**Limitation 2: Initial Indexing Time**
-- Embedding 1000 documents takes ~20 minutes
-- **Mitigation**: Incremental updates, background processing, progress indicators
-
-**Limitation 3: Hardware Requirements**
-- Requires ~4GB RAM for Ollama + embeddings
-- **Mitigation**: Use smaller models (`all-minilm` requires <1GB)
-
-**Limitation 4: Vector Store Updates**
-- FAISS doesn't support efficient deletion
-- **Mitigation**: Periodic index rebuilds or use Chroma instead
-
----
-
 ## Key Files Reference
 
 ### Core Search Implementation
@@ -1360,23 +847,18 @@ The Obsidian Copilot semantic search implementation is a sophisticated system th
 4. **Hybrid retrieval** that merges results from multiple sources
 5. **Flexible embedding** support including local models (Ollama, LM Studio)
 
-For a CLI-based AI agent targeting local-only operation:
+**For CLI-based AI agents**: Connect to the plugin via MCP (Model Context Protocol) to access this search infrastructure without reimplementing it. The plugin handles all indexing, embeddings, and search - your agent simply calls the `localSearch` tool through MCP.
 
-- Use **Ollama** with `nomic-embed-text` for embeddings
-- Use **FAISS** or **Chroma** for vector storage
-- Use **FlexSearch** for lexical search
-- Implement **incremental indexing** with file watching
-- Follow the **chunking strategy** from this codebase (heading-first, 6000 chars)
-
-The provided implementation examples should serve as a solid foundation for building a local semantic search system that doesn't rely on external APIs while maintaining good performance and search quality.
+**For contributors**: This document provides the internal architecture details needed to understand, maintain, and enhance the search system.
 
 ---
 
 ## Additional Resources
 
+**MCP Documentation**: https://modelcontextprotocol.io/
+**MCP TypeScript SDK**: https://github.com/modelcontextprotocol/typescript-sdk
+**MCP Python SDK**: https://github.com/modelcontextprotocol/python-sdk
+**Obsidian Copilot Tool Docs**: [docs/TOOLS.md](docs/TOOLS.md)
 **Ollama Documentation**: https://ollama.com/
-**FAISS Documentation**: https://faiss.ai/
-**FlexSearch Documentation**: https://github.com/nextapps-de/flexsearch
-**LangChain TextSplitters**: https://js.langchain.com/docs/modules/data_connection/document_transformers/
 
 **Obsidian Copilot Repository**: https://github.com/XtromAI/obsidian-copilot
