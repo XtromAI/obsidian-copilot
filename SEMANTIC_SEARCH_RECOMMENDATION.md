@@ -2,20 +2,31 @@
 
 ## Overview
 
-This document provides recommendations for implementing a simplified, modern semantic search system that prioritizes:
+This document provides recommendations for implementing a simplified, modern semantic search system for a **CLI-based AI Agent Client** that integrates with Obsidian to provide AI assistant capabilities.
+
+**Target Audience**: Developers building CLI tools that need to search Obsidian vaults for AI-powered assistance.
+
+**Use Case**: An external CLI agent (separate from this Obsidian Copilot plugin) that:
+- Connects to Obsidian to provide AI assistance
+- Needs to search the vault to provide context for AI responses
+- Wants a simple, local-only implementation
+- Requires minimal dependencies and easy deployment
+
+### Design Priorities
+
 - **Local-only operation** (no external API dependencies)
-- **CLI agent accessibility** (via standardized protocols)
-- **Minimal dependencies** (only what's essential within the plugin)
-- **Simple deployment** (easy for users to set up and maintain)
+- **Standalone CLI tool** (runs independently of Obsidian plugin)
+- **Minimal dependencies** (keep the tool lightweight)
+- **Simple deployment** (easy for users to install and use)
 
 ## Design Philosophy
 
 ### Core Principles
 
 1. **Everything Runs Locally**: No cloud APIs, no external services
-2. **Plugin-Embedded**: All search logic lives within the Obsidian plugin
+2. **Standalone Tool**: Independent CLI application that reads Obsidian vaults
 3. **Zero Configuration**: Works out-of-the-box with sensible defaults
-4. **CLI-First**: Designed for programmatic access by external tools
+4. **Obsidian Integration**: Reads vault files directly, no plugin required
 
 ## Recommended Architecture
 
@@ -23,29 +34,34 @@ This document provides recommendations for implementing a simplified, modern sem
 
 ```
 ┌─────────────────────────────────────────┐
-│         CLI Agent (Your Tool)           │
-└─────────────────┬───────────────────────┘
-                  │ IPC/JSON-RPC
-                  ↓
-┌─────────────────────────────────────────┐
-│      Obsidian Plugin (This Repo)        │
+│    Your CLI Agent Tool (Separate App)   │
 │  ┌───────────────────────────────────┐  │
-│  │  Search API Layer                 │  │
+│  │  AI Assistant Logic               │  │
 │  └───────────┬───────────────────────┘  │
 │              │                           │
 │  ┌───────────▼───────────────────────┐  │
-│  │  Unified Search Engine            │  │
+│  │  Semantic Search Module           │  │
 │  │  - Lexical (BM25)                 │  │
 │  │  - Semantic (Local Embeddings)    │  │
 │  └───────────┬───────────────────────┘  │
 │              │                           │
 │  ┌───────────▼───────────────────────┐  │
-│  │  Storage Layer                    │  │
-│  │  - In-memory index                │  │
-│  │  - Optional disk cache            │  │
+│  │  Vault File Reader                │  │
+│  │  - Reads .md files                │  │
+│  │  - Parses frontmatter             │  │
 │  └───────────────────────────────────┘  │
+└─────────────┬───────────────────────────┘
+              │ Direct file access
+              ↓
+┌─────────────────────────────────────────┐
+│       Obsidian Vault (File System)      │
+│  - Notes/*.md                            │
+│  - Daily/*.md                            │
+│  - Projects/*.md                         │
 └─────────────────────────────────────────┘
 ```
+
+**Key Difference**: Your CLI tool directly reads the Obsidian vault files from the filesystem, no need for plugin communication.
 
 ## Implementation Details
 
@@ -256,96 +272,80 @@ class SimpleChunker {
 - Easy to debug
 - Works well with small embedding models
 
-### 5. CLI Interface
+### 5. Vault File Reader
 
-**Recommendation**: JSON-RPC over stdio for CLI agent communication.
-
-```typescript
-// Plugin exposes JSON-RPC server
-class SearchRPCServer {
-  private searchEngine: UnifiedSearch;
-  
-  constructor() {
-    this.searchEngine = new UnifiedSearch();
-    this.setupRPCHandler();
-  }
-  
-  private setupRPCHandler() {
-    // Listen on stdin for JSON-RPC requests
-    process.stdin.on('data', async (data) => {
-      const request = JSON.parse(data.toString());
-      const response = await this.handleRequest(request);
-      process.stdout.write(JSON.stringify(response) + '\n');
-    });
-  }
-  
-  private async handleRequest(request: any) {
-    switch (request.method) {
-      case 'search':
-        return {
-          id: request.id,
-          result: await this.searchEngine.search(
-            request.params.query,
-            request.params.options
-          )
-        };
-      
-      case 'index':
-        return {
-          id: request.id,
-          result: await this.searchEngine.indexDocument(
-            request.params.path,
-            request.params.content
-          )
-        };
-      
-      default:
-        return {
-          id: request.id,
-          error: { code: -32601, message: 'Method not found' }
-        };
-    }
-  }
-}
-```
-
-**CLI Agent Example**:
+**Recommendation**: Direct filesystem access to read Obsidian vault.
 
 ```typescript
-// CLI tool connects via stdio
-class ObsidianSearchClient {
-  private child: ChildProcess;
-  private requestId: number = 0;
+import * as fs from 'fs';
+import * as path from 'path';
+import matter from 'gray-matter';  // For frontmatter parsing
+
+class VaultReader {
+  constructor(private vaultPath: string) {}
   
-  async connect() {
-    this.child = spawn('obsidian', ['--search-rpc']);
-  }
-  
-  async search(query: string, options?: any): Promise<SearchResult[]> {
-    const request = {
-      jsonrpc: '2.0',
-      method: 'search',
-      params: { query, options },
-      id: ++this.requestId
+  // Find all markdown files in vault
+  async getAllMarkdownFiles(): Promise<string[]> {
+    const files: string[] = [];
+    
+    const walk = async (dir: string) => {
+      const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        
+        if (entry.isDirectory()) {
+          // Skip .obsidian and .trash folders
+          if (!entry.name.startsWith('.')) {
+            await walk(fullPath);
+          }
+        } else if (entry.name.endsWith('.md')) {
+          files.push(fullPath);
+        }
+      }
     };
     
-    this.child.stdin.write(JSON.stringify(request) + '\n');
+    await walk(this.vaultPath);
+    return files;
+  }
+  
+  // Read and parse a markdown file
+  async readNote(filePath: string): Promise<Note> {
+    const content = await fs.promises.readFile(filePath, 'utf-8');
+    const { data: frontmatter, content: body } = matter(content);
     
-    return new Promise((resolve) => {
-      this.child.stdout.once('data', (data) => {
-        const response = JSON.parse(data.toString());
-        resolve(response.result);
-      });
+    return {
+      path: path.relative(this.vaultPath, filePath),
+      content: body,
+      frontmatter,
+      title: path.basename(filePath, '.md')
+    };
+  }
+  
+  // Watch for file changes (optional)
+  watchVault(callback: (event: string, filename: string) => void) {
+    fs.watch(this.vaultPath, { recursive: true }, (event, filename) => {
+      if (filename && filename.endsWith('.md')) {
+        callback(event, path.join(this.vaultPath, filename));
+      }
     });
   }
+}
+
+interface Note {
+  path: string;
+  content: string;
+  frontmatter: any;
+  title: string;
 }
 ```
 
 **Benefits**:
-- Standard protocol (JSON-RPC 2.0)
-- No HTTP server needed
-- Works with any language
-- Secure (no network exposure)
+- No plugin dependency
+- Direct access to all vault files
+- Can read metadata from frontmatter
+- Simple to implement
+- Works even when Obsidian is closed
 
 ### 6. Unified Search Engine
 
@@ -357,12 +357,24 @@ class UnifiedSearch {
   private semantic: VectorIndex;
   private embedder: LocalEmbedding;
   private chunker: SimpleChunker;
+  private vaultReader: VaultReader;
   
-  constructor() {
+  constructor(vaultPath: string) {
     this.lexical = new BM25Search();
     this.semantic = new VectorIndex(384);
     this.embedder = new LocalEmbedding();
     this.chunker = new SimpleChunker();
+    this.vaultReader = new VaultReader(vaultPath);
+  }
+  
+  // Index entire vault
+  async indexVault() {
+    const files = await this.vaultReader.getAllMarkdownFiles();
+    
+    for (const filePath of files) {
+      const note = await this.vaultReader.readNote(filePath);
+      await this.indexDocument(note.path, note.content);
+    }
   }
   
   async indexDocument(path: string, content: string) {
@@ -451,11 +463,12 @@ class UnifiedSearch {
 ```json
 {
   "@xenova/transformers": "^2.17.0",    // WebAssembly embeddings (~500KB)
-  "hnswlib-wasm": "^1.0.0"              // Vector search (~200KB)
+  "hnswlib-wasm": "^1.0.0",             // Vector search (~200KB)
+  "gray-matter": "^4.0.3"               // Frontmatter parsing (~50KB)
 }
 ```
 
-**Total Bundle Impact**: ~700KB (acceptable for modern plugin)
+**Total Bundle Impact**: ~750KB (acceptable for CLI tool)
 
 ### Not Required
 
@@ -494,56 +507,101 @@ class UnifiedSearch {
 
 ## Usage Examples
 
-### For Plugin Users
+### For CLI Tool Users
 
-**Zero Configuration**: Search works immediately after installation.
+**Simple Usage**: Point the tool at your Obsidian vault.
 
-```typescript
-// Plugin automatically indexes vault on startup
-const plugin = new SemanticSearchPlugin();
-await plugin.onload();  // Indexes vault in background
+```bash
+# Install your CLI tool
+npm install -g your-ai-agent
 
-// Search is immediately available
-const results = await plugin.search("machine learning algorithms");
+# Initialize with vault path
+your-ai-agent init ~/Documents/ObsidianVault
+
+# Use AI assistant (search happens automatically)
+your-ai-agent ask "What notes do I have about machine learning?"
 ```
 
-### For CLI Agent Developers
+### For CLI Tool Developers
 
-**Simple Integration**: Standard JSON-RPC protocol.
+**Implementation Example**:
+
+```typescript
+// Main CLI application
+import { UnifiedSearch } from './search';
+import { Command } from 'commander';
+
+const program = new Command();
+let searchEngine: UnifiedSearch;
+
+program
+  .command('init <vaultPath>')
+  .description('Initialize with Obsidian vault')
+  .action(async (vaultPath: string) => {
+    console.log('Indexing vault...');
+    searchEngine = new UnifiedSearch(vaultPath);
+    await searchEngine.indexVault();
+    console.log('Done! Vault indexed.');
+  });
+
+program
+  .command('ask <question>')
+  .description('Ask AI assistant a question')
+  .action(async (question: string) => {
+    // Search vault for relevant context
+    const results = await searchEngine.search(question, { maxResults: 5 });
+    
+    // Build context for AI
+    const context = results
+      .map(r => `Source: ${r.id}\n${r.content}`)
+      .join('\n\n---\n\n');
+    
+    // Send to AI with context (your AI logic here)
+    const answer = await yourAIFunction(question, context);
+    console.log(answer);
+  });
+
+program.parse();
+```
+
+**Python Example**:
 
 ```python
-# Python CLI agent example
-import json
-import subprocess
+# Python CLI tool
+import sys
+from pathlib import Path
+from your_search import UnifiedSearch
 
-class ObsidianSearch:
-    def __init__(self):
-        self.proc = subprocess.Popen(
-            ['obsidian', '--search-rpc'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True
-        )
+class ObsidianAIAgent:
+    def __init__(self, vault_path: str):
+        self.vault_path = Path(vault_path)
+        self.search = UnifiedSearch(vault_path)
     
-    def search(self, query: str, max_results: int = 10):
-        request = {
-            'jsonrpc': '2.0',
-            'method': 'search',
-            'params': {'query': query, 'options': {'maxResults': max_results}},
-            'id': 1
-        }
+    async def init(self):
+        """Index the vault"""
+        print("Indexing vault...")
+        await self.search.index_vault()
+        print("Done!")
+    
+    async def ask(self, question: str):
+        """Answer a question using vault context"""
+        # Search vault
+        results = await self.search.search(question, max_results=5)
         
-        self.proc.stdin.write(json.dumps(request) + '\n')
-        self.proc.stdin.flush()
+        # Build context
+        context = "\n\n---\n\n".join([
+            f"Source: {r['id']}\n{r['content']}"
+            for r in results
+        ])
         
-        response = json.loads(self.proc.stdout.readline())
-        return response['result']
+        # Your AI logic here
+        answer = await your_ai_function(question, context)
+        print(answer)
 
 # Usage
-search = ObsidianSearch()
-results = search.search("quantum computing")
-for result in results:
-    print(f"{result['id']}: {result['score']:.3f}")
+if __name__ == "__main__":
+    agent = ObsidianAIAgent(sys.argv[1])
+    asyncio.run(agent.init())
 ```
 
 ## Performance Characteristics
@@ -573,52 +631,59 @@ for result in results:
 - **Memory Usage**: ~100MB for 10k documents
 - **Disk Usage**: Optional (~50MB for 10k documents)
 
-## Comparison with Current Implementation
+## Comparison with Obsidian Copilot Plugin
 
-| Aspect | Current System | Recommended System |
-|--------|---------------|-------------------|
-| **Dependencies** | 10+ packages, LangChain ecosystem | 2 packages total |
+| Aspect | Obsidian Copilot Plugin | Recommended CLI Tool |
+|--------|------------------------|---------------------|
+| **Type** | Obsidian plugin | Standalone CLI application |
+| **Dependencies** | 10+ packages, LangChain ecosystem | 3 packages total |
 | **External Services** | Optional Ollama/LM Studio | None |
-| **Bundle Size** | ~5MB+ | ~700KB |
+| **Bundle Size** | ~5MB+ | ~750KB |
 | **Setup Complexity** | API keys or Ollama setup | Zero config |
-| **CLI Access** | Custom protocol | Standard JSON-RPC |
+| **Vault Access** | Via Obsidian API | Direct filesystem access |
 | **Embedding Source** | External APIs or Ollama | Built-in WebAssembly |
 | **Performance** | Variable (depends on external) | Consistent (~100ms) |
 | **Offline** | Requires Ollama for local | Fully offline |
+| **Obsidian Required** | Yes | No (reads files directly) |
 
-## Migration Path
+## Development Roadmap
 
-For existing users who want to migrate to the simplified system:
+Building this as a standalone CLI tool:
 
-### Step 1: Add New System (Parallel)
+### Week 1: Core Search
 
-```typescript
-// Add new system alongside existing
-class ModernSemanticSearch {
-  // New implementation
-}
-
-// Keep old system for compatibility
-class LegacySemanticSearch {
-  // Existing implementation
-}
+```bash
+your-agent/
+├── src/
+│   ├── search/
+│   │   ├── bm25.ts          # Lexical search
+│   │   ├── vector.ts        # Vector index
+│   │   ├── embeddings.ts    # Transformers.js wrapper
+│   │   ├── chunker.ts       # Simple chunking
+│   │   └── unified.ts       # Combines both
+│   ├── vault/
+│   │   └── reader.ts        # Vault file reader
+│   └── index.ts             # CLI entry point
+├── package.json
+└── README.md
 ```
 
-### Step 2: Feature Flag
+### Week 2: CLI Interface
 
-```typescript
-// User can choose system in settings
-const searchEngine = settings.useModernSearch 
-  ? new ModernSemanticSearch()
-  : new LegacySemanticSearch();
+```bash
+# Commands to implement
+your-agent init <vault-path>     # Index vault
+your-agent search <query>        # Test search
+your-agent ask <question>        # AI assistant
+your-agent reindex              # Rebuild index
 ```
 
-### Step 3: Gradual Rollout
+### Week 3: AI Integration
 
-1. Release with opt-in flag
-2. Monitor performance and feedback
-3. Make modern system default
-4. Eventually deprecate legacy system
+- Integrate with your preferred AI model
+- Add conversation context management
+- Implement result ranking
+- Add caching for repeated queries
 
 ## Security Considerations
 
@@ -626,38 +691,39 @@ const searchEngine = settings.useModernSearch
 
 1. **No API Keys**: No risk of key leakage
 2. **No Network**: No data sent externally
-3. **No External Process**: Fewer attack vectors
-4. **Sandboxed**: Runs in plugin context
+3. **Direct File Access**: Read-only by default
+4. **Offline**: No external dependencies
 
-### JSON-RPC Security
+### Vault Access Security
 
-1. **Stdio Only**: No network exposure
-2. **Input Validation**: Validate all RPC params
-3. **Rate Limiting**: Prevent abuse
-4. **Permissions**: Respect Obsidian's plugin permissions
+1. **Read-Only**: Only read vault files, don't modify
+2. **Respect .obsidian**: Skip configuration folders
+3. **Path Validation**: Validate vault path is legitimate
+4. **Permissions**: Follow OS file permissions
 
 ## Conclusion
 
-This simplified implementation provides:
+This simplified implementation provides a **standalone CLI tool** for AI agents with:
 
-✅ **Local-only operation** - Everything runs in the plugin  
-✅ **No external dependencies** - Only 2 small packages needed  
-✅ **CLI accessible** - Standard JSON-RPC protocol  
+✅ **Local-only operation** - Everything runs in your CLI tool  
+✅ **No external dependencies** - Only 3 small packages needed  
+✅ **Direct vault access** - Read Obsidian files directly from filesystem  
 ✅ **Zero configuration** - Works out-of-the-box  
 ✅ **Good performance** - ~100ms search latency  
-✅ **Small footprint** - ~700KB bundle size  
+✅ **Small footprint** - ~750KB bundle size  
 ✅ **Easy maintenance** - Simple codebase  
+✅ **No Obsidian required** - Can run even when Obsidian is closed
 
-This approach trades some flexibility (fewer embedding models, simpler algorithms) for significant gains in simplicity, reliability, and user experience.
+This approach is ideal for building CLI-based AI assistants that need to search Obsidian vaults without requiring the Obsidian Copilot plugin.
 
 ## Additional Resources
 
 **Transformers.js Documentation**: https://huggingface.co/docs/transformers.js  
 **HNSW Algorithm**: https://arxiv.org/abs/1603.09320  
 **BM25 Reference**: https://en.wikipedia.org/wiki/Okapi_BM25  
-**JSON-RPC Specification**: https://www.jsonrpc.org/specification  
-**Reciprocal Rank Fusion**: https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf
+**Reciprocal Rank Fusion**: https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf  
+**gray-matter (Frontmatter)**: https://github.com/jonschlinkert/gray-matter
 
 ---
 
-**Document Purpose**: This is a recommendation for a simplified approach. The actual implementation in this repository may differ. See `SEMANTIC_SEARCH_IMPLEMENTATION.md` for details on the current implementation.
+**Document Purpose**: This is a recommendation for building a separate CLI-based AI agent tool that needs semantic search capabilities for Obsidian vaults. This is NOT a recommendation for modifying the Obsidian Copilot plugin in this repository. See `SEMANTIC_SEARCH_IMPLEMENTATION.md` for details on how the Obsidian Copilot plugin currently implements search.
