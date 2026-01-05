@@ -2,80 +2,18 @@
 
 ## Overview
 
-This document provides a comprehensive analysis of the semantic search implementation in Obsidian Copilot. The system combines vector-based semantic search with lexical (keyword-based) search to provide powerful note retrieval capabilities for AI agents.
-
-**For CLI-Based AI Agents**: This document explains how external CLI agents can access Obsidian Copilot's built-in semantic search via **MCP (Model Context Protocol)**. The search functionality is fully integrated into the Obsidian plugin - users only need to install your CLI tool, and it can query the plugin's semantic search through MCP without any additional setup.
+This document provides a comprehensive analysis of the semantic search implementation in Obsidian Copilot. The system combines vector-based semantic search with lexical (keyword-based) search to provide powerful note retrieval capabilities.
 
 ## Table of Contents
 
-1. [Accessing Search from CLI Agents (MCP)](#accessing-search-from-cli-agents-mcp)
-2. [Architecture Overview](#architecture-overview)
-3. [Package Dependencies](#package-dependencies)
-4. [Data Storage](#data-storage)
-5. [Chunking Strategy](#chunking-strategy)
-6. [Embedding Models](#embedding-models)
-7. [Vector Search Implementation](#vector-search-implementation)
-8. [Lexical Search (v3)](#lexical-search-v3)
-9. [Key Files Reference](#key-files-reference)(#key-files-reference)
-
----
-
-## Accessing Search from CLI Agents (MCP)
-
-**Important**: The semantic search functionality described in this document is **already built into the Obsidian Copilot plugin**. CLI agents don't need to re-implement it - they access it through **Model Context Protocol (MCP)**.
-
-### Quick Start for CLI Developers
-
-1. **Users Install**: Obsidian Copilot plugin + your CLI tool
-2. **Your CLI**: Connect via MCP to access search
-3. **Plugin Handles**: All indexing, embeddings, and search logic
-
-### How It Works
-
-```
-CLI Agent → MCP → Obsidian Plugin → Semantic Search → Results
-```
-
-The plugin exposes its search functionality as an MCP tool that your CLI agent can call:
-
-```typescript
-// MCP tool interface (exposed by plugin)
-{
-  name: "localSearch",
-  description: "Search vault with semantic + lexical retrieval",
-  parameters: {
-    query: string,        // User's search query
-    maxK?: number,       // Max results (default: 10)
-    salientTerms?: string[]  // Additional keywords
-  }
-}
-```
-
-### MCP Integration Example
-
-```typescript
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-
-// Connect to plugin
-const client = new Client({ name: "my-cli-agent", version: "1.0.0" });
-await client.connect(transport);
-
-// Search the vault
-const results = await client.callTool({
-  name: "localSearch",
-  arguments: {
-    query: "machine learning algorithms",
-    maxK: 10
-  }
-});
-
-// Use results in your agent
-console.log(results.documents);
-```
-
-**For full MCP integration details, see the [docs/TOOLS.md](docs/TOOLS.md) file in this repository.**
-
-**The rest of this document explains how the plugin's search works internally** - useful for understanding behavior, contributing, or debugging, but **not required for CLI integration**.
+1. [Architecture Overview](#architecture-overview)
+2. [Package Dependencies](#package-dependencies)
+3. [Data Storage](#data-storage)
+4. [Chunking Strategy](#chunking-strategy)
+5. [Embedding Models](#embedding-models)
+6. [Vector Search Implementation](#vector-search-implementation)
+7. [Lexical Search (v3)](#lexical-search-v3)
+8. [Key Files Reference](#key-files-reference)
 
 ---
 
@@ -847,18 +785,14 @@ The Obsidian Copilot semantic search implementation is a sophisticated system th
 4. **Hybrid retrieval** that merges results from multiple sources
 5. **Flexible embedding** support including local models (Ollama, LM Studio)
 
-**For CLI-based AI agents**: Connect to the plugin via MCP (Model Context Protocol) to access this search infrastructure without reimplementing it. The plugin handles all indexing, embeddings, and search - your agent simply calls the `localSearch` tool through MCP.
-
-**For contributors**: This document provides the internal architecture details needed to understand, maintain, and enhance the search system.
+This document provides the internal architecture details needed to understand, maintain, and enhance the search system.
 
 ---
 
 ## Additional Resources
 
-**MCP Documentation**: https://modelcontextprotocol.io/
-**MCP TypeScript SDK**: https://github.com/modelcontextprotocol/typescript-sdk
-**MCP Python SDK**: https://github.com/modelcontextprotocol/python-sdk
-**Obsidian Copilot Tool Docs**: [docs/TOOLS.md](docs/TOOLS.md)
 **Ollama Documentation**: https://ollama.com/
+**FlexSearch Documentation**: https://github.com/nextapps-de/flexsearch
+**LangChain TextSplitters**: https://js.langchain.com/docs/modules/data_connection/document_transformers/
 
 **Obsidian Copilot Repository**: https://github.com/XtromAI/obsidian-copilot
